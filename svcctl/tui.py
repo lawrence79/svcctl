@@ -243,6 +243,7 @@ class SvcctlApp(App[None]):
         self._tail_stop = threading.Event()
         self._svc_data: dict[str, dict] = {}
         self._known_rows: set[str] = set()
+        self._daemon_connected: bool = True
 
     # ── layout ────────────────────────────────────────────────────────────────
 
@@ -271,14 +272,22 @@ class SvcctlApp(App[None]):
         table.add_column("service", key="name")
         table.add_column("uptime", key="uptime", width=7)
         self._poll_status()
-        self.set_interval(_POLL_SECS, self._poll_status)
+        self._poll_timer = self.set_interval(_POLL_SECS, self._poll_status)
 
     # ── status polling ────────────────────────────────────────────────────────
 
     def _poll_status(self) -> None:
         resp = daemon_request({"action": "status"})
         if not resp:
+            if self._daemon_connected:
+                self._daemon_connected = False
+                self.sub_title = "daemon unreachable"
+                self.notify("Cannot connect to daemon. Run: svcctl daemon", severity="error", timeout=5)
+                self._poll_timer.stop()
             return
+        if not self._daemon_connected:
+            self._daemon_connected = True
+            self.sub_title = "service manager"
         services: list[dict] = resp.get("services", [])
 
         table = self.query_one("#service-table", DataTable)
