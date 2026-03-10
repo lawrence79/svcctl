@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from typing import ClassVar
 
 from rich.text import Text
@@ -10,7 +9,7 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static
+from textual.widgets import DataTable, Footer, Header, RichLog, Static
 
 from .config import get_log_dir
 from .ipc import daemon_request, daemon_running
@@ -30,37 +29,6 @@ _STATUS_STYLE = {
 
 
 # ── widgets ───────────────────────────────────────────────────────────────────
-
-
-class ServiceItem(ListItem):
-    """One row in the sidebar service list."""
-
-    def __init__(self, info: dict) -> None:
-        super().__init__()
-        self.svc_info = info
-
-    @property
-    def svc_name(self) -> str:
-        return self.svc_info["name"]
-
-    def compose(self) -> ComposeResult:
-        yield Label(self._render_text(), id="svc-label")
-
-    def refresh_info(self, info: dict) -> None:
-        self.svc_info = info
-        self.query_one("#svc-label", Label).update(self._render_text())
-
-    def _render_text(self) -> Text:
-        st = self.svc_info["status"]
-        dot = _STATUS_DOT.get(st, "?")
-        style = _STATUS_STYLE.get(st, "")
-        uptime = self.svc_info.get("uptime")
-        t = Text()
-        t.append(f" {dot} ", style=style)
-        t.append(self.svc_info["name"])
-        if uptime is not None:
-            t.append(f"  {fmt_uptime(uptime)}", style="dim")
-        return t
 
 
 class StatusBar(Static):
@@ -91,7 +59,7 @@ class StatusBar(Static):
 class SvcctlApp(App[None]):
     CSS = """
     #sidebar {
-        width: 28;
+        width: 32;
         border-right: solid $surface-darken-2;
         padding: 0;
     }
@@ -104,14 +72,15 @@ class SvcctlApp(App[None]):
         text-style: bold;
     }
 
-    ListView {
+    DataTable {
         height: 1fr;
         border: none;
         padding: 0;
     }
 
-    ListItem {
-        padding: 0;
+    DataTable > .datatable--cursor {
+        background: $accent 25%;
+        color: $text;
     }
 
     #log-container {
@@ -142,7 +111,8 @@ class SvcctlApp(App[None]):
         super().__init__()
         self._watching: str | None = None
         self._tail_stop = threading.Event()
-        self._item_map: dict[str, ServiceItem] = {}
+        self._svc_data: dict[str, dict] = {}
+        self._known_rows: set[str] = set()
 
     # ── layout ────────────────────────────────────────────────────────────────
 
@@ -151,7 +121,7 @@ class SvcctlApp(App[None]):
         with Horizontal():
             with Vertical(id="sidebar"):
                 yield Static(" SERVICES", id="sidebar-header")
-                yield ListView(id="service-list")
+                yield DataTable(id="service-table", show_header=False, cursor_type="row")
             with Vertical(id="log-container"):
                 yield StatusBar("", id="status-bar")
                 yield RichLog(
@@ -166,6 +136,10 @@ class SvcctlApp(App[None]):
     def on_mount(self) -> None:
         self.title = "svcctl"
         self.sub_title = "service manager"
+        table = self.query_one("#service-table", DataTable)
+        table.add_column("", key="dot", width=2)
+        table.add_column("service", key="name")
+        table.add_column("uptime", key="uptime", width=7)
         self._poll_status()
         self.set_interval(_POLL_SECS, self._poll_status)
 
@@ -177,48 +151,39 @@ class SvcctlApp(App[None]):
             return
         services: list[dict] = resp.get("services", [])
 
-        lv = self.query_one("#service-list", ListView)
-        current_names = [s["name"] for s in services]
+        table = self.query_one("#service-table", DataTable)
+        current_names = {s["name"] for s in services}
 
-        # Update existing items, add new ones
         for svc in services:
             name = svc["name"]
-            if name in self._item_map:
-                self._item_map[name].refresh_info(svc)
+            self._svc_data[name] = svc
+            dot = Text(_STATUS_DOT.get(svc["status"], "?"), style=_STATUS_STYLE.get(svc["status"], ""))
+            uptime = Text(fmt_uptime(svc["uptime"]) if svc["uptime"] is not None else "—", style="dim")
+            if name in self._known_rows:
+                table.update_cell(name, "dot", dot)
+                table.update_cell(name, "uptime", uptime)
             else:
-                item = ServiceItem(svc)
-                self._item_map[name] = item
-                lv.append(item)
+                table.add_row(dot, name, uptime, key=name)
+                self._known_rows.add(name)
+                if table.row_count == 1:
+                    self._switch_log(name)
 
-        # Remove stale items
-        for name in list(self._item_map):
+        for name in list(self._known_rows):
             if name not in current_names:
-                self._item_map.pop(name).remove()
+                self._known_rows.discard(name)
+                self._svc_data.pop(name, None)
+                table.remove_row(name)
 
-        # Auto-select first item on startup
-        if lv.index is None and services:
-            lv.index = 0
-            self._switch_log(services[0]["name"])
-
-        # Keep status bar fresh for the currently selected service
-        selected = self._selected_info()
-        self.query_one("#status-bar", StatusBar).update_svc(selected)
+        self.query_one("#status-bar", StatusBar).update_svc(self._selected_info())
 
     # ── log panel ─────────────────────────────────────────────────────────────
 
-    @on(ListView.Selected)
-    def _on_list_selected(self, event: ListView.Selected) -> None:
-        item = event.item
-        if isinstance(item, ServiceItem):
-            self._switch_log(item.svc_name)
-            self.query_one("#status-bar", StatusBar).update_svc(item.svc_info)
-
-    @on(ListView.Highlighted)
-    def _on_list_highlighted(self, event: ListView.Highlighted) -> None:
-        item = event.item
-        if isinstance(item, ServiceItem):
-            self._switch_log(item.svc_name)
-            self.query_one("#status-bar", StatusBar).update_svc(item.svc_info)
+    @on(DataTable.RowHighlighted)
+    def _on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.row_key and event.row_key.value:
+            name = event.row_key.value
+            self._switch_log(name)
+            self.query_one("#status-bar", StatusBar).update_svc(self._svc_data.get(name))
 
     def _switch_log(self, name: str) -> None:
         if name == self._watching:
@@ -239,8 +204,7 @@ class SvcctlApp(App[None]):
                 # Seed with last _INIT_BYTES
                 f.seek(0, 2)
                 f.seek(max(0, f.tell() - _INIT_BYTES))
-                seed = f.read().splitlines()
-                for line in seed:
+                for line in f.read().splitlines():
                     if stop.is_set():
                         return
                     self._write_log_line(log, line)
@@ -253,7 +217,6 @@ class SvcctlApp(App[None]):
                         stop.wait(0.05)
         except FileNotFoundError:
             self.call_from_thread(log.write, Text(f"  [no log file yet for {name}]", style="dim"))
-            # Poll until the log file appears, then switch to tailing it
             while not stop.is_set():
                 stop.wait(0.5)
                 if (get_log_dir() / f"{name}.log").exists():
@@ -269,18 +232,15 @@ class SvcctlApp(App[None]):
     # ── actions ───────────────────────────────────────────────────────────────
 
     def _selected_name(self) -> str | None:
-        lv = self.query_one("#service-list", ListView)
-        item = lv.highlighted_child
-        if isinstance(item, ServiceItem):
-            return item.svc_name
-        return None
+        table = self.query_one("#service-table", DataTable)
+        if not table.row_count:
+            return None
+        cell_key = table.coordinate_to_cell_key(table.cursor_coordinate)
+        return cell_key.row_key.value
 
     def _selected_info(self) -> dict | None:
-        lv = self.query_one("#service-list", ListView)
-        item = lv.highlighted_child
-        if isinstance(item, ServiceItem):
-            return item.svc_info
-        return None
+        name = self._selected_name()
+        return self._svc_data.get(name) if name else None
 
     def action_service_start(self) -> None:
         if name := self._selected_name():
@@ -288,9 +248,7 @@ class SvcctlApp(App[None]):
             if resp is None:
                 self.notify("Could not reach daemon.", severity="error")
             else:
-                results = resp.get("results", [])
-                if results:
-                    r = results[0]
+                for r in resp.get("results", []):
                     self.notify(r["msg"], severity="information" if r["ok"] else "warning")
             self._poll_status()
 
@@ -300,9 +258,7 @@ class SvcctlApp(App[None]):
             if resp is None:
                 self.notify("Could not reach daemon.", severity="error")
             else:
-                results = resp.get("results", [])
-                if results:
-                    r = results[0]
+                for r in resp.get("results", []):
                     self.notify(r["msg"], severity="information" if r["ok"] else "warning")
             self._poll_status()
 
@@ -312,9 +268,7 @@ class SvcctlApp(App[None]):
             if resp is None:
                 self.notify("Could not reach daemon.", severity="error")
             else:
-                results = resp.get("results", [])
-                if results:
-                    r = results[0]
+                for r in resp.get("results", []):
                     self.notify(r["msg"], severity="information" if r["ok"] else "warning")
             self._poll_status()
 
