@@ -1,0 +1,12 @@
+services:
+  api:
+    dir: ./api
+    cmd: yarn start
+    env_file: .env
+    auto_restart: true
+    restart_delay: 2
+
+  web:
+    dir: ./web
+    cmd: yarn dev
+    auto_restart: true
