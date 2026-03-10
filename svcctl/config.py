@@ -41,3 +41,25 @@ def load_config() -> dict:
         sys.exit(1)
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+def load_config_raw() -> dict:
+    import yaml
+    path = get_config_path()
+    if not path.exists():
+        return {"services": {}}
+    with open(path) as f:
+        data = yaml.safe_load(f)
+    if not data:
+        return {"services": {}}
+    if "services" not in data:
+        data["services"] = {}
+    return data
+
+
+def save_config(cfg: dict) -> None:
+    import yaml
+    path = get_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)

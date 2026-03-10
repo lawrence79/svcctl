@@ -17,10 +17,16 @@ class Daemon:
     def __init__(self, config_path: str) -> None:
         self.config_path = Path(config_path).resolve()
         self.config_dir = self.config_path.parent
-        with open(self.config_path) as f:
-            cfg = yaml.safe_load(f)
+        self._lock = threading.Lock()
 
         self.services: dict[str, ServiceProcess] = {}
+        for name, svc in self._parse_config().items():
+            self.services[name] = ServiceProcess(name, svc)
+
+    def _parse_config(self) -> dict[str, dict]:
+        with open(self.config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+        result = {}
         for name, svc in cfg.get("services", {}).items():
             svc = dict(svc)
             for key in ("dir", "cmd"):
@@ -28,7 +34,8 @@ class Daemon:
                     print(f"[error] Service '{name}' is missing required key '{key}' in config.", file=sys.stderr)
                     sys.exit(1)
             svc["dir"] = str((self.config_dir / svc["dir"]).resolve())
-            self.services[name] = ServiceProcess(name, svc)
+            result[name] = svc
+        return result
 
     def run(self) -> None:
         pid_file = get_pid_file()
@@ -79,17 +86,51 @@ class Daemon:
         name = msg.get("name")
 
         if action == "status":
-            return {"services": [s.info() for s in self.services.values()]}
+            with self._lock:
+                return {"services": [s.info() for s in self.services.values()]}
         if action == "start":
-            return {"results": [s.start() for s in self._resolve(name)]}
+            with self._lock:
+                return {"results": [s.start() for s in self._resolve(name)]}
         if action == "stop":
-            return {"results": [s.stop() for s in self._resolve(name)]}
+            with self._lock:
+                return {"results": [s.stop() for s in self._resolve(name)]}
         if action == "restart":
-            return {"results": [s.restart() for s in self._resolve(name)]}
+            with self._lock:
+                return {"results": [s.restart() for s in self._resolve(name)]}
         if action == "ping":
             return {"pong": True}
+        if action == "reload":
+            return self._do_reload()
 
         return {"error": f"Unknown action: {action}"}
+
+    def _do_reload(self) -> dict:
+        try:
+            new_cfgs = self._parse_config()
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+        with self._lock:
+            current_keys = set(self.services.keys())
+            new_keys = set(new_cfgs.keys())
+
+            removed = []
+            for name in current_keys - new_keys:
+                try:
+                    self.services[name].stop()
+                except Exception:
+                    pass
+                del self.services[name]
+                removed.append(name)
+
+            added = []
+            for name in new_keys - current_keys:
+                svc = ServiceProcess(name, new_cfgs[name])
+                svc.start()
+                self.services[name] = svc
+                added.append(name)
+
+        return {"ok": True, "added": added, "removed": removed}
 
     def _resolve(self, name: str | None) -> list[ServiceProcess]:
         if name is None or name == "all":

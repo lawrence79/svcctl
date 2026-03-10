@@ -5,7 +5,7 @@ from pathlib import Path
 
 import click
 
-from .config import get_config_path, get_log_dir
+from .config import get_config_path, get_log_dir, load_config_raw, save_config
 from .ipc import daemon_request, daemon_running, ensure_daemon
 from .utils import fmt_uptime
 
@@ -163,6 +163,73 @@ def ui() -> None:
     """Interactive TUI — live logs and service controls."""
     from .tui import run_tui
     run_tui()
+
+
+@cli.command(name="add")
+@click.argument("name")
+@click.option("--dir", "svc_dir", required=True, help="Directory for the service.")
+@click.option("--cmd", required=True, help="Command to run.")
+@click.option("--env-file", default=None, help="Path to env file (relative to dir).")
+@click.option("--no-auto-restart", is_flag=True, default=False, help="Disable auto-restart.")
+@click.option("--restart-delay", default=2, show_default=True, type=int, help="Restart delay in seconds.")
+def add_service(name: str, svc_dir: str, cmd: str, env_file: str | None, no_auto_restart: bool, restart_delay: int) -> None:
+    """Add a new service to services.yaml and start it."""
+    cfg = load_config_raw()
+    if name in cfg["services"]:
+        click.echo(f"[error] Service '{name}' already exists.", err=True)
+        raise SystemExit(1)
+    entry: dict = {"dir": svc_dir, "cmd": cmd, "auto_restart": not no_auto_restart, "restart_delay": restart_delay}
+    if env_file:
+        entry["env_file"] = env_file
+    cfg["services"][name] = entry
+    save_config(cfg)
+    if daemon_running():
+        resp = daemon_request({"action": "reload"})
+        if resp and resp.get("ok"):
+            click.echo(f"  ✓  Added and started '{name}'")
+        else:
+            click.echo(f"  ✓  Added '{name}' to config (daemon reload failed: {resp})", err=True)
+    else:
+        ensure_daemon()
+        click.echo(f"  ✓  Added '{name}' and started daemon")
+
+
+@cli.command(name="remove")
+@click.argument("name")
+def remove_service(name: str) -> None:
+    """Remove a service from services.yaml and stop it."""
+    cfg = load_config_raw()
+    if name not in cfg["services"]:
+        click.echo(f"[error] Service '{name}' not found in config.", err=True)
+        raise SystemExit(1)
+    del cfg["services"][name]
+    save_config(cfg)
+    if daemon_running():
+        resp = daemon_request({"action": "reload"})
+        if resp and resp.get("ok"):
+            click.echo(f"  ✓  Stopped and removed '{name}'")
+        else:
+            click.echo(f"  ✓  Removed '{name}' from config (daemon reload failed: {resp})", err=True)
+    else:
+        click.echo(f"  ✓  Removed '{name}' from config (daemon not running)")
+
+
+@cli.command(name="reload")
+def reload_cmd() -> None:
+    """Reload services.yaml in the running daemon."""
+    if not daemon_running():
+        click.echo("[info] Daemon is not running.")
+        return
+    resp = daemon_request({"action": "reload"})
+    if not resp:
+        click.echo("[error] Could not reach daemon.", err=True)
+        raise SystemExit(1)
+    if not resp.get("ok"):
+        click.echo(f"[error] Reload failed: {resp.get('error')}", err=True)
+        raise SystemExit(1)
+    added = resp.get("added", [])
+    removed = resp.get("removed", [])
+    click.echo(f"  ✓  Reloaded — added: {added or '(none)'}, removed: {removed or '(none)'}")
 
 
 @cli.command(hidden=True)
