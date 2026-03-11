@@ -15,11 +15,16 @@ def send_msg(sock: socket.socket, obj: dict) -> None:
     sock.sendall(struct.pack(">I", len(data)) + data)
 
 
+_MAX_MSG_BYTES = 1 * 1024 * 1024  # 1 MB
+
+
 def recv_msg(sock: socket.socket) -> dict | None:
     raw = _recv_exact(sock, 4)
     if not raw:
         return None
     length = struct.unpack(">I", raw)[0]
+    if length > _MAX_MSG_BYTES:
+        raise ValueError(f"Incoming message too large: {length} bytes")
     data = _recv_exact(sock, length)
     if not data:
         return None

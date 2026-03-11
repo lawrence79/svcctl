@@ -9,6 +9,8 @@ from pathlib import Path
 from .config import get_log_dir
 
 _SEP = "─" * 60
+_LOG_FLUSH_INTERVAL_SECS = 0.1
+_LOG_FLUSH_MAX_LINES = 20
 
 
 class ServiceProcess:
@@ -42,9 +44,9 @@ class ServiceProcess:
 
     def stop(self) -> dict:
         with self._lock:
+            self._stop_flag = True
             if self.status != "running" or not self.proc:
                 return {"ok": False, "msg": f"{self.name} is not running"}
-            self._stop_flag = True
             proc = self.proc
             try:
                 # Each service gets its own session via start_new_session=True,
@@ -57,8 +59,11 @@ class ServiceProcess:
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            try:
+                proc.kill()
+                proc.wait()
+            except OSError:
+                pass
 
         with self._lock:
             if self.proc is proc:
@@ -86,13 +91,23 @@ class ServiceProcess:
             "pid": self.pid,
             "restart_count": self.restart_count,
             "uptime": uptime,
-            "log": str(self.log_path()),
         }
 
     def log_path(self) -> Path:
         return get_log_dir() / f"{self.name}.log"
 
     # ── internals ─────────────────────────────────────────────────────────────
+
+    def _build_cmd(self) -> str:
+        cmd = self.cfg["cmd"]
+        use_nvm = self.cfg.get("use_nvm")
+        if use_nvm is None:
+            use_nvm = (Path(self.cfg["dir"]) / ".nvmrc").exists()
+        if not use_nvm:
+            return cmd
+        nvm_dir = os.environ.get("NVM_DIR", str(Path.home() / ".nvm"))
+        nvm_sh = Path(nvm_dir) / "nvm.sh"
+        return f'bash -l -c \'source "{nvm_sh}" && nvm use && exec {cmd}\''
 
     def _open_log(self):
         return open(self.log_path(), "a", buffering=1)
@@ -105,9 +120,24 @@ class ServiceProcess:
             if env_path.exists():
                 for line in env_path.read_text().splitlines():
                     line = line.strip()
-                    if line and not line.startswith("#") and "=" in line:
-                        k, _, v = line.partition("=")
-                        env[k.strip()] = v.strip().strip('"').strip("'")
+                    if not line or line.startswith("#"):
+                        continue
+                    # Strip optional 'export ' prefix
+                    if line.startswith("export "):
+                        line = line[7:].strip()
+                    if "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    k = k.strip()
+                    v = v.strip()
+                    # Quoted values — preserve internal whitespace, strip outer quotes
+                    if len(v) >= 2 and v[0] in ('"', "'") and v[-1] == v[0]:
+                        v = v[1:-1]
+                    else:
+                        # Strip inline comments on unquoted values
+                        v = v.split(" #")[0].rstrip()
+                    if k:
+                        env[k] = v
         return env
 
     def _do_start(self) -> None:
@@ -115,7 +145,7 @@ class ServiceProcess:
         self._gen += 1
         gen = self._gen
         cwd = str(Path(self.cfg["dir"]).resolve())
-        cmd = self.cfg["cmd"]
+        cmd = self._build_cmd()
         env = self._build_env()
         log_f = self._open_log()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -149,17 +179,29 @@ class ServiceProcess:
 
     def _pipe_writer(self, pipe, log_f) -> None:
         """Read process stdout/stderr and write timestamped lines to log."""
+        last_flush = time.monotonic()
+        pending_lines = 0
         try:
             for raw in pipe:
                 ts = datetime.now().strftime("%H:%M:%S")
                 try:
                     log_f.write(f"[{ts}] {raw.rstrip(chr(10))}\n")
-                    log_f.flush()
+                    pending_lines += 1
+                    now = time.monotonic()
+                    if pending_lines >= _LOG_FLUSH_MAX_LINES or (now - last_flush) >= _LOG_FLUSH_INTERVAL_SECS:
+                        log_f.flush()
+                        last_flush = now
+                        pending_lines = 0
                 except Exception:
                     break
         except Exception:
             pass
         finally:
+            if pending_lines:
+                try:
+                    log_f.flush()
+                except Exception:
+                    pass
             pipe.close()
 
     def _watch(self, gen: int, proc: subprocess.Popen, log_f) -> None:
@@ -189,8 +231,8 @@ class ServiceProcess:
 
         if self.cfg.get("auto_restart", True) and not self._stop_flag and gen == self._gen:
             delay = self.cfg.get("restart_delay", 2)
-            self.restart_count += 1
             time.sleep(delay)
             with self._lock:
                 if not self._stop_flag and gen == self._gen:
+                    self.restart_count += 1
                     self._do_start()

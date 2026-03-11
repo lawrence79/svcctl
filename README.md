@@ -153,3 +153,9 @@ Runtime files:
 | `~/.svcctl/daemon.pid` | Daemon PID |
 | `~/.svcctl/daemon.sock` | IPC socket |
 | `~/.svcctl/logs/<name>.log` | Per-service log |
+
+## Performance Notes
+
+- The daemon now handles IPC requests with a bounded worker pool, which avoids unbounded thread growth during bursts of client polling.
+- Status responses include a structural revision marker; the TUI uses it to skip expensive full table refreshes when only uptime changed.
+- Service log forwarding batches flushes in short intervals instead of flushing every line, reducing I/O overhead for noisy services while keeping logs near-real-time.

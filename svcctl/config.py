@@ -1,5 +1,4 @@
 import os
-import sys
 from pathlib import Path
 
 
@@ -32,24 +31,25 @@ def get_log_dir() -> Path:
     return d
 
 
-def load_config() -> dict:
+def _read_yaml(path: Path) -> dict | None:
     import yaml
-    path = get_config_path()
     if not path.exists():
-        print(f"[error] No services.yaml found at {path}", file=sys.stderr)
-        print("        Run 'svcctl init' to generate one.", file=sys.stderr)
-        sys.exit(1)
+        return None
     with open(path) as f:
         return yaml.safe_load(f)
 
 
-def load_config_raw() -> dict:
-    import yaml
+def load_config() -> dict:
     path = get_config_path()
-    if not path.exists():
-        return {"services": {}}
-    with open(path) as f:
-        data = yaml.safe_load(f)
+    data = _read_yaml(path)
+    if data is None:
+        raise FileNotFoundError(f"No services.yaml found at {path}")
+    return data
+
+
+def load_config_raw() -> dict:
+    path = get_config_path()
+    data = _read_yaml(path)
     if not data:
         return {"services": {}}
     if "services" not in data:
