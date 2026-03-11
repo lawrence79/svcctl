@@ -143,12 +143,15 @@ class ConfirmRemoveModal(ModalScreen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-remove":
-            cfg = load_config_raw()
-            if self._name in cfg["services"]:
-                del cfg["services"][self._name]
-                save_config(cfg)
-                daemon_request({"action": "reload"})
-            self.dismiss(True)
+            resp = daemon_request({"action": "remove", "name": self._name})
+            if not resp or not resp.get("ok"):
+                self.app.notify(
+                    (resp.get("error") if resp else None) or "Failed to remove service",
+                    severity="error",
+                )
+                self.dismiss(False)
+            else:
+                self.dismiss(True)
         else:
             self.dismiss(False)
 

@@ -227,19 +227,23 @@ def add_service(name: str, svc_dir: str | None, cmd: str | None, env_file: str |
 @click.argument("name")
 def remove_service(name: str) -> None:
     """Remove a service from services.yaml and stop it."""
-    cfg = load_config_raw()
-    if name not in cfg["services"]:
-        click.echo(f"[error] Service '{name}' not found in config.", err=True)
-        raise SystemExit(1)
-    del cfg["services"][name]
-    save_config(cfg)
     if daemon_running():
-        resp = daemon_request({"action": "reload"})
-        if resp and resp.get("ok"):
+        resp = daemon_request({"action": "remove", "name": name})
+        if not resp:
+            click.echo("[error] Could not reach daemon.", err=True)
+            raise SystemExit(1)
+        if resp.get("ok"):
             click.echo(f"  ✓  Stopped and removed '{name}'")
         else:
-            click.echo(f"  ✓  Removed '{name}' from config (daemon reload failed: {resp})", err=True)
+            click.echo(f"[error] {resp.get('error', 'Unknown error')}", err=True)
+            raise SystemExit(1)
     else:
+        cfg = load_config_raw()
+        if name not in cfg["services"]:
+            click.echo(f"[error] Service '{name}' not found in config.", err=True)
+            raise SystemExit(1)
+        del cfg["services"][name]
+        save_config(cfg)
         click.echo(f"  ✓  Removed '{name}' from config (daemon not running)")
 
 

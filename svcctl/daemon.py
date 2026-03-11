@@ -103,6 +103,8 @@ class Daemon:
             return {"pong": True}
         if action == "reload":
             return self._do_reload()
+        if action == "remove":
+            return self._do_remove(name)
 
         return {"error": f"Unknown action: {action}"}
 
@@ -133,6 +135,31 @@ class Daemon:
                 added.append(name)
 
         return {"ok": True, "added": added, "removed": removed}
+
+    def _do_remove(self, name: str | None) -> dict:
+        if not name:
+            return {"ok": False, "error": "No service name provided"}
+        with self._lock:
+            if name not in self.services:
+                return {"ok": False, "error": f"Service '{name}' not found"}
+            svc = self.services.pop(name)
+
+        try:
+            svc.stop()
+        except Exception:
+            pass
+
+        try:
+            with open(self.config_path) as f:
+                cfg = yaml.safe_load(f) or {}
+            if name in cfg.get("services", {}):
+                del cfg["services"][name]
+                with open(self.config_path, "w") as f:
+                    yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+        except Exception:
+            pass
+
+        return {"ok": True}
 
     def _resolve(self, name: str | None) -> list[ServiceProcess]:
         if name is None or name == "all":
