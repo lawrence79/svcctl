@@ -33,9 +33,11 @@ There are no test suites, lint configs, or Makefiles in this project.
 ## Config Format
 
 ```yaml
+root: ~/projects        # optional; all service dirs resolved relative to this
+
 services:
   api:
-    dir: ./api          # relative to services.yaml
+    dir: api            # relative to root (or services.yaml if root not set)
     cmd: yarn start
     env_file: .env      # optional; relative to dir
     auto_restart: true  # default: true

@@ -26,8 +26,6 @@ class Daemon:
     def _parse_config(self) -> dict[str, dict]:
         with open(self.config_path) as f:
             cfg = yaml.safe_load(f) or {}
-        root_raw = cfg.get("root")
-        root = Path(root_raw).expanduser().resolve() if root_raw else self.config_dir
         result = {}
         for name, svc in cfg.get("services", {}).items():
             svc = dict(svc)
@@ -35,7 +33,7 @@ class Daemon:
                 if key not in svc:
                     print(f"[error] Service '{name}' is missing required key '{key}' in config.", file=sys.stderr)
                     sys.exit(1)
-            svc["dir"] = str((root / svc["dir"]).resolve())
+            svc["dir"] = str((self.config_dir / svc["dir"]).resolve())
             result[name] = svc
         return result
 

@@ -12,12 +12,18 @@ from .utils import fmt_uptime
 STARTER_CONFIG = """\
 # svcctl — services configuration
 
-root: ~/projects
-
 services:
   api:
-    dir: api
-    cmd: ./run.sh
+    dir: ./apps/api
+    cmd: yarn start
+    env_file: .env
+    auto_restart: true
+    restart_delay: 2
+
+  web:
+    dir: ./apps/web
+    cmd: yarn dev
+    env_file: .env
     auto_restart: true
     restart_delay: 2
 """
@@ -159,55 +165,20 @@ def ui() -> None:
     run_tui()
 
 
-def _pick_directory(initialdir: str | None = None, title: str = "Select service directory") -> str | None:
-    """Open a native folder-picker dialog. Returns the chosen path or None."""
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.wm_attributes("-topmost", True)
-        path = filedialog.askdirectory(title=title, initialdir=initialdir or Path.home())
-        root.destroy()
-        return path or None
-    except Exception:
-        return None
-
-
-def _get_root(cfg: dict) -> Path | None:
-    raw = cfg.get("root")
-    return Path(raw).expanduser().resolve() if raw else None
-
-
 @cli.command(name="add")
 @click.argument("name")
-@click.option("--dir", "svc_dir", default=None, help="Directory for the service (opens picker if omitted).")
-@click.option("--cmd", default=None, help="Command to run (default: ./run.sh).")
+@click.option("--dir", "svc_dir", required=True, help="Directory for the service.")
+@click.option("--cmd", required=True, help="Command to run.")
 @click.option("--env-file", default=None, help="Path to env file (relative to dir).")
 @click.option("--no-auto-restart", is_flag=True, default=False, help="Disable auto-restart.")
 @click.option("--restart-delay", default=2, show_default=True, type=int, help="Restart delay in seconds.")
-def add_service(name: str, svc_dir: str | None, cmd: str | None, env_file: str | None, no_auto_restart: bool, restart_delay: int) -> None:
+def add_service(name: str, svc_dir: str, cmd: str, env_file: str | None, no_auto_restart: bool, restart_delay: int) -> None:
     """Add a new service to services.yaml and start it."""
     cfg = load_config_raw()
-    root = _get_root(cfg)
-
-    if not svc_dir:
-        picked = _pick_directory(initialdir=str(root) if root else None)
-        if not picked:
-            click.echo("[error] No directory selected.", err=True)
-            raise SystemExit(1)
-        picked_path = Path(picked).resolve()
-        if root and picked_path.is_relative_to(root):
-            svc_dir = str(picked_path.relative_to(root))
-        else:
-            svc_dir = str(picked_path)
-        click.echo(f"  dir  {svc_dir}")
-
     if name in cfg["services"]:
         click.echo(f"[error] Service '{name}' already exists.", err=True)
         raise SystemExit(1)
-
-    entry: dict = {"dir": svc_dir, "cmd": cmd or "./run.sh", "auto_restart": not no_auto_restart, "restart_delay": restart_delay}
+    entry: dict = {"dir": svc_dir, "cmd": cmd, "auto_restart": not no_auto_restart, "restart_delay": restart_delay}
     if env_file:
         entry["env_file"] = env_file
     cfg["services"][name] = entry

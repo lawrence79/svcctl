@@ -42,9 +42,9 @@ class ServiceProcess:
 
     def stop(self) -> dict:
         with self._lock:
-            self._stop_flag = True
             if self.status != "running" or not self.proc:
                 return {"ok": False, "msg": f"{self.name} is not running"}
+            self._stop_flag = True
             proc = self.proc
             try:
                 # Each service gets its own session via start_new_session=True,
