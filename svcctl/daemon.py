@@ -29,6 +29,8 @@ class Daemon:
             self.services[name] = ServiceProcess(name, svc)
 
     def _parse_config(self) -> dict[str, dict]:
+        if not self.config_path.exists():
+            return {}
         with open(self.config_path) as f:
             cfg = yaml.safe_load(f) or {}
         root_raw = cfg.get("root")

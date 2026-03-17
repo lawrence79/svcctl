@@ -425,59 +425,66 @@ class SvcctlApp(App[None]):
 
         table = self.query_one("#service-table", DataTable)
         current_names = {s["name"] for s in services}
+        first_added: str | None = None
 
-        for svc in services:
-            name = svc["name"]
-            prev = self._svc_data.get(name)
-            self._svc_data[name] = svc
-            uptime = Text(fmt_uptime(svc["uptime"]) if svc["uptime"] is not None else "—", style="dim")
-            if name in self._known_rows:
-                if not prev or prev.get("status") != svc["status"]:
+        with self.batch_update():
+            for svc in services:
+                name = svc["name"]
+                prev = self._svc_data.get(name)
+                self._svc_data[name] = svc
+                uptime = Text(fmt_uptime(svc["uptime"]) if svc["uptime"] is not None else "—", style="dim")
+                if name in self._known_rows:
+                    if not prev or prev.get("status") != svc["status"]:
+                        dot = Text(_STATUS_DOT.get(svc["status"], "?"), style=_STATUS_STYLE.get(svc["status"], ""))
+                        table.update_cell(name, "dot", dot)
+                    table.update_cell(name, "uptime", uptime)
+                else:
                     dot = Text(_STATUS_DOT.get(svc["status"], "?"), style=_STATUS_STYLE.get(svc["status"], ""))
-                    table.update_cell(name, "dot", dot)
-                table.update_cell(name, "uptime", uptime)
-            else:
-                dot = Text(_STATUS_DOT.get(svc["status"], "?"), style=_STATUS_STYLE.get(svc["status"], ""))
-                table.add_row(dot, name, uptime, key=name)
-                self._known_rows.add(name)
-                if table.row_count == 1:
-                    self._switch_log(name)
+                    table.add_row(dot, name, uptime, key=name)
+                    self._known_rows.add(name)
+                    if first_added is None:
+                        first_added = name
 
-        for name in list(self._known_rows):
-            if name not in current_names:
-                self._known_rows.discard(name)
-                self._svc_data.pop(name, None)
-                table.remove_row(name)
+            for name in list(self._known_rows):
+                if name not in current_names:
+                    self._known_rows.discard(name)
+                    self._svc_data.pop(name, None)
+                    table.remove_row(name)
 
+        if first_added is not None and self._watching is None:
+            self._switch_log(first_added)
         self.query_one("#status-bar", StatusBar).update_svc(self._selected_info())
 
     def _apply_uptime_only(self, services: list[dict]) -> None:
         table = self.query_one("#service-table", DataTable)
         current_names = {s["name"] for s in services}
+        status_changed = False
 
-        for svc in services:
-            name = svc["name"]
-            prev = self._svc_data.get(name)
-            self._svc_data[name] = svc
-            if name not in self._known_rows:
-                dot = Text(_STATUS_DOT.get(svc["status"], "?"), style=_STATUS_STYLE.get(svc["status"], ""))
+        with self.batch_update():
+            for svc in services:
+                name = svc["name"]
+                prev = self._svc_data.get(name)
+                self._svc_data[name] = svc
+                if name not in self._known_rows:
+                    dot = Text(_STATUS_DOT.get(svc["status"], "?"), style=_STATUS_STYLE.get(svc["status"], ""))
+                    uptime = Text(fmt_uptime(svc["uptime"]) if svc["uptime"] is not None else "—", style="dim")
+                    table.add_row(dot, name, uptime, key=name)
+                    self._known_rows.add(name)
+                    continue
+
+                if prev and prev.get("status") != svc["status"]:
+                    dot = Text(_STATUS_DOT.get(svc["status"], "?"), style=_STATUS_STYLE.get(svc["status"], ""))
+                    table.update_cell(name, "dot", dot)
+                    status_changed = True
                 uptime = Text(fmt_uptime(svc["uptime"]) if svc["uptime"] is not None else "—", style="dim")
-                table.add_row(dot, name, uptime, key=name)
-                self._known_rows.add(name)
-                continue
+                table.update_cell(name, "uptime", uptime)
 
-            if prev and prev.get("status") != svc["status"]:
-                dot = Text(_STATUS_DOT.get(svc["status"], "?"), style=_STATUS_STYLE.get(svc["status"], ""))
-                table.update_cell(name, "dot", dot)
-                self.query_one("#status-bar", StatusBar).update_svc(self._selected_info())
-            uptime = Text(fmt_uptime(svc["uptime"]) if svc["uptime"] is not None else "—", style="dim")
-            table.update_cell(name, "uptime", uptime)
+            for name in list(self._known_rows):
+                if name not in current_names:
+                    self._known_rows.discard(name)
+                    self._svc_data.pop(name, None)
+                    table.remove_row(name)
 
-        for name in list(self._known_rows):
-            if name not in current_names:
-                self._known_rows.discard(name)
-                self._svc_data.pop(name, None)
-                table.remove_row(name)
         self.query_one("#status-bar", StatusBar).update_svc(self._selected_info())
 
     # ── log panel ─────────────────────────────────────────────────────────────
@@ -629,6 +636,7 @@ class SvcctlApp(App[None]):
 
 
 def run_tui() -> None:
-    from .ipc import ensure_daemon
+    from .ipc import ensure_daemon, stop_daemon
     ensure_daemon()
     SvcctlApp().run()
+    stop_daemon()

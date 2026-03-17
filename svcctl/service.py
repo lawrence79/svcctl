@@ -48,21 +48,52 @@ class ServiceProcess:
             if self.status != "running" or not self.proc:
                 return {"ok": False, "msg": f"{self.name} is not running"}
             proc = self.proc
+
+        # Snapshot the full descendant tree *before* signalling — once the
+        # parent dies, children may be re-parented to PID 1 and harder to find.
+        try:
+            import psutil
+            parent = psutil.Process(proc.pid)
+            children = parent.children(recursive=True)
+        except Exception:
+            children = []
+
+        # SIGTERM the process group (well-behaved children), then any
+        # stragglers found via psutil (e.g. nx/lerna daemons that called setsid).
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
             try:
-                # Each service gets its own session via start_new_session=True,
-                # so killpg only kills that service's process tree.
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except Exception:
                 proc.terminate()
+            except Exception:
+                pass
+
+        for child in children:
+            try:
+                child.send_signal(signal.SIGTERM)
+            except Exception:
+                pass
 
         # Wait outside the lock so _watch threads can also finish.
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
+            # Escalate: SIGKILL the group and any surviving descendants.
             try:
-                proc.kill()
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            for child in children:
+                try:
+                    child.send_signal(signal.SIGKILL)
+                except Exception:
+                    pass
+            try:
                 proc.wait()
-            except OSError:
+            except Exception:
                 pass
 
         with self._lock:
@@ -114,6 +145,10 @@ class ServiceProcess:
 
     def _build_env(self) -> dict:
         env = os.environ.copy()
+        for item in self.cfg.get("env", []):
+            if "=" in str(item):
+                k, _, v = str(item).partition("=")
+                env[k.strip()] = v.strip()
         env_file = self.cfg.get("env_file")
         if env_file:
             env_path = Path(self.cfg["dir"]) / env_file

@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6",
     "textual>=0.50",
+    "psutil>=5.9",
 ]
 
 [project.scripts]

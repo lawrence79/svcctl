@@ -70,6 +70,17 @@ def daemon_running() -> bool:
         return False
 
 
+def stop_daemon() -> None:
+    pid_file = get_pid_file()
+    if not pid_file.exists():
+        return
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, 15)  # SIGTERM
+    except (ProcessLookupError, ValueError, FileNotFoundError, PermissionError):
+        pass
+
+
 def ensure_daemon() -> None:
     if daemon_running():
         return
