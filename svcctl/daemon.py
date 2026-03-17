@@ -57,11 +57,11 @@ class Daemon:
         atexit.register(lambda: (sp.unlink(missing_ok=True), server.close()))
 
         def _shutdown(*_):
-            for svc in self.services.values():
-                try:
-                    svc.stop()
-                except Exception:
-                    pass
+            import concurrent.futures
+            svcs = list(self.services.values())
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(svcs) or 1) as pool:
+                futs = [pool.submit(svc.stop) for svc in svcs]
+                concurrent.futures.wait(futs, timeout=10)
             self._handler_pool.shutdown(wait=False, cancel_futures=True)
             sys.exit(0)
 
@@ -165,6 +165,11 @@ class Daemon:
                     self.services[name].cfg = new_cfgs[name]
                     to_restart.append(self.services[name])
                     updated.append(name)
+
+            # Invalidate cached signature so the next status poll always triggers
+            # a full _apply_status in the TUI, picking up new/removed service names.
+            if added or removed or updated:
+                self._last_status_signature = None
 
         for svc in to_start_new:
             try:

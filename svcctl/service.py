@@ -28,6 +28,7 @@ class ServiceProcess:
         self.log_file = None
         self._lock = threading.Lock()
         self._stop_flag = False
+        self._crash_streak = 0  # consecutive crashes without a clean run
         # Incremented on every _do_start; each _watch thread holds its own
         # copy so stale threads from before a restart exit cleanly.
         self._gen = 0
@@ -39,6 +40,7 @@ class ServiceProcess:
             if self.status == "running":
                 return {"ok": False, "msg": f"{self.name} is already running"}
             self._stop_flag = False
+            self._crash_streak = 0  # manual start resets backoff
             self._do_start()
             return {"ok": True, "msg": f"Started {self.name} (pid {self.pid})"}
 
@@ -182,6 +184,22 @@ class ServiceProcess:
         cwd = str(Path(self.cfg["dir"]).resolve())
         cmd = self._build_cmd()
         env = self._build_env()
+        # Close the previous log handle before opening a new one (auto-restart path).
+        if self.log_file:
+            try:
+                self.log_file.close()
+            except Exception:
+                pass
+            self.log_file = None
+        # Truncate log if it exceeds max_log_bytes (applied before each start).
+        max_log_bytes = self.cfg.get("max_log_bytes")
+        if max_log_bytes:
+            log_path = self.log_path()
+            try:
+                if log_path.exists() and log_path.stat().st_size > max_log_bytes:
+                    log_path.unlink()
+            except Exception:
+                pass
         log_f = self._open_log()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_f.write(f"\n{_SEP}\n[svcctl] Starting {self.name} at {ts}\n{_SEP}\n")
@@ -265,7 +283,29 @@ class ServiceProcess:
             self.pid = None
 
         if self.cfg.get("auto_restart", True) and not self._stop_flag and gen == self._gen:
-            delay = self.cfg.get("restart_delay", 2)
+            base_delay = self.cfg.get("restart_delay", 2)
+            # If the process ran for at least 10 seconds it was healthy; reset streak.
+            ran_for = (time.time() - self.started_at) if self.started_at else 0
+            if ran_for >= 10:
+                self._crash_streak = 0
+            self._crash_streak += 1
+
+            max_restarts = self.cfg.get("max_restarts", 0)
+            if max_restarts > 0 and self.restart_count >= max_restarts:
+                with self._lock:
+                    if gen == self._gen:
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        try:
+                            log_f.write(
+                                f"\n[svcctl] {self.name} reached max_restarts={max_restarts} at {ts}. Stopping.\n"
+                            )
+                            log_f.flush()
+                        except Exception:
+                            pass
+                        self.status = "stopped"
+                return
+
+            delay = min(base_delay * (2 ** (self._crash_streak - 1)), 60)
             time.sleep(delay)
             with self._lock:
                 if not self._stop_flag and gen == self._gen:

@@ -1,3 +1,4 @@
+import fcntl
 import json
 import os
 import socket
@@ -64,10 +65,17 @@ def daemon_running() -> bool:
         return False
     try:
         pid = int(pid_file.read_text().strip())
-        os.kill(pid, 0)
-        return True
+        os.kill(pid, 0)  # check process exists
     except (ProcessLookupError, ValueError, FileNotFoundError, PermissionError):
         return False
+    # Verify the process is actually svcctl, not a PID-reuse collision.
+    try:
+        import psutil
+        cmdline = psutil.Process(pid).cmdline()
+        return any("svcctl" in part or "__main__" in part for part in cmdline)
+    except Exception:
+        # psutil unavailable or process vanished — fall back to trusting the PID.
+        return True
 
 
 def stop_daemon() -> None:
@@ -82,23 +90,37 @@ def stop_daemon() -> None:
 
 
 def ensure_daemon() -> None:
+    # Fast path — no locking needed if daemon is already verified running.
     if daemon_running():
         return
-    config_path = get_config_path().resolve()
-    env = os.environ.copy()
-    env["SVCCTL_CONFIG"] = str(config_path)
-    env["SVCCTL_RUNTIME"] = str(get_runtime_dir())
-    subprocess.Popen(
-        [sys.executable, "-m", "svcctl", "daemon", "--config", str(config_path)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        start_new_session=True,
-        env=env,
-    )
-    for _ in range(20):
-        time.sleep(0.2)
+
+    # Serialize concurrent callers (e.g. two TUI windows opening simultaneously)
+    # with a lock file so only one spawns the daemon.
+    lock_path = get_runtime_dir() / "daemon.lock"
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)  # blocks until we hold the lock
+        # Re-check inside the lock; another process may have just started the daemon.
         if daemon_running():
             return
-    print("[error] Daemon failed to start.", file=sys.stderr)
-    sys.exit(1)
+        config_path = get_config_path().resolve()
+        env = os.environ.copy()
+        env["SVCCTL_CONFIG"] = str(config_path)
+        env["SVCCTL_RUNTIME"] = str(get_runtime_dir())
+        subprocess.Popen(
+            [sys.executable, "-m", "svcctl", "daemon", "--config", str(config_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+            env=env,
+        )
+        for _ in range(20):
+            time.sleep(0.2)
+            if daemon_running():
+                return
+        print("[error] Daemon failed to start.", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
